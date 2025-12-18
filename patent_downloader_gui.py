@@ -38,13 +38,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Setup separate logger for failed downloads
+failed_logger = logging.getLogger('failed_patents')
+failed_logger.setLevel(logging.INFO)
+failed_handler = logging.FileHandler('failed_patents.log')
+failed_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+failed_logger.addHandler(failed_handler)
+failed_logger.propagate = False  # Don't propagate to root logger
+
 
 class PatentDownloaderGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Google Patent PDF Downloader")
-        self.root.geometry("900x700")
+        self.root.geometry("1000x850")
         self.root.resizable(True, True)
+        
+        # Set minimum window size to ensure buttons are always visible
+        self.root.minsize(900, 750)
         
         # Modern color scheme
         self.colors = {
@@ -69,6 +80,8 @@ class PatentDownloaderGUI:
         self.output_dir = "downloaded_patents"
         self.is_downloading = False
         self.driver = None
+        self.failed_patents = []  # Track failed patents
+        self.direct_download_first = tk.BooleanVar(value=True)  # Try direct download without Chrome first
         
         # Create GUI
         self.create_widgets()
@@ -111,27 +124,112 @@ class PatentDownloaderGUI:
         )
         main_frame.pack(fill=tk.BOTH, expand=True, side=tk.TOP)
         
+        # IMPORTANT: Pack bottom buttons FIRST with side=BOTTOM to ensure they're always visible
+        # Bottom Frame with modern buttons - PACK THIS FIRST!
+        bottom_frame = tk.Frame(main_frame, bg=self.colors['background'], pady=8)
+        bottom_frame.pack(fill=tk.X, side=tk.BOTTOM, expand=False)
+        
+        # Left side buttons
+        left_buttons = tk.Frame(bottom_frame, bg=self.colors['background'])
+        left_buttons.pack(side=tk.LEFT)
+        
+        self.stop_btn = tk.Button(
+            left_buttons,
+            text="⏹️ Stop Download",
+            command=self.stop_download,
+            bg=self.colors['danger'],
+            fg="white",
+            font=("Segoe UI", 9, "bold"),
+            padx=15,
+            pady=8,
+            state=tk.DISABLED,
+            cursor="hand2",
+            relief=tk.FLAT,
+            bd=0,
+            activebackground="#c5221f",
+            activeforeground="white",
+            disabledforeground="white"
+        )
+        self.stop_btn.pack(side=tk.LEFT, padx=(0, 8))
+        
+        open_folder_btn = tk.Button(
+            left_buttons,
+            text="📂 Open Downloads Folder",
+            command=self.open_output_folder,
+            bg="#5f6368",
+            fg="white",
+            font=("Segoe UI", 9, "bold"),
+            padx=15,
+            pady=8,
+            cursor="hand2",
+            relief=tk.FLAT,
+            bd=0,
+            activebackground="#4a4d50",
+            activeforeground="white",
+            disabledforeground="white"
+        )
+        open_folder_btn.pack(side=tk.LEFT)
+        
+        # Right side buttons - Log files
+        right_buttons = tk.Frame(bottom_frame, bg=self.colors['background'])
+        right_buttons.pack(side=tk.RIGHT)
+        
+        open_main_log_btn = tk.Button(
+            right_buttons,
+            text="📄 Main Log",
+            command=self.open_main_log,
+            bg=self.colors['primary'],
+            fg="white",
+            font=("Segoe UI", 9, "bold"),
+            padx=15,
+            pady=8,
+            cursor="hand2",
+            relief=tk.FLAT,
+            bd=0,
+            activebackground=self.colors['primary_dark'],
+            activeforeground="white"
+        )
+        open_main_log_btn.pack(side=tk.LEFT, padx=(0, 8))
+        
+        open_failed_log_btn = tk.Button(
+            right_buttons,
+            text="❌ Failed Patents Log",
+            command=self.open_failed_log,
+            bg=self.colors['accent'],
+            fg="white",
+            font=("Segoe UI", 9, "bold"),
+            padx=15,
+            pady=8,
+            cursor="hand2",
+            relief=tk.FLAT,
+            bd=0,
+            activebackground="#e5a903",
+            activeforeground="white"
+        )
+        open_failed_log_btn.pack(side=tk.LEFT)
+        
+        # NOW pack everything else from top to bottom
         # File Selection Section - Modern card style
         file_frame = tk.Frame(
             main_frame,
             bg=self.colors['surface'],
             highlightbackground=self.colors['border'],
             highlightthickness=1,
-            padx=20,
-            pady=20
+            padx=15,
+            pady=12
         )
-        file_frame.pack(fill=tk.X, pady=(0, 15))
+        file_frame.pack(fill=tk.X, pady=(0, 10))
         
         # Section header
         section_label = tk.Label(
             file_frame,
             text="📁 Select Excel File",
-            font=("Segoe UI", 13, "bold"),
+            font=("Segoe UI", 11, "bold"),
             bg=self.colors['surface'],
             fg=self.colors['text'],
             anchor=tk.W
         )
-        section_label.pack(fill=tk.X, pady=(0, 12))
+        section_label.pack(fill=tk.X, pady=(0, 8))
         
         file_path_frame = tk.Frame(file_frame, bg=self.colors['surface'])
         file_path_frame.pack(fill=tk.X)
@@ -139,7 +237,7 @@ class PatentDownloaderGUI:
         self.file_entry = tk.Entry(
             file_path_frame,
             textvariable=self.excel_file,
-            font=("Segoe UI", 11),
+            font=("Segoe UI", 10),
             state="readonly",
             bg="#f1f3f4",
             fg=self.colors['text'],
@@ -149,7 +247,7 @@ class PatentDownloaderGUI:
             highlightbackground=self.colors['border'],
             highlightcolor=self.colors['primary']
         )
-        self.file_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 12), ipady=8)
+        self.file_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10), ipady=6)
         
         browse_btn = tk.Button(
             file_path_frame,
@@ -157,9 +255,9 @@ class PatentDownloaderGUI:
             command=self.browse_file,
             bg=self.colors['primary'],
             fg="white",
-            font=("Segoe UI", 11, "bold"),
-            padx=25,
-            pady=8,
+            font=("Segoe UI", 10, "bold"),
+            padx=20,
+            pady=6,
             cursor="hand2",
             relief=tk.FLAT,
             bd=0,
@@ -171,15 +269,15 @@ class PatentDownloaderGUI:
         info_label = tk.Label(
             file_frame,
             text="💡 Excel file must have a 'Display Key' column with patent numbers",
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 8),
             fg=self.colors['text_secondary'],
             bg=self.colors['surface']
         )
-        info_label.pack(anchor=tk.W, pady=(10, 0))
+        info_label.pack(anchor=tk.W, pady=(6, 0))
         
-        # Download Button Section
+        # Download Button Section (Direct download enabled by default)
         button_frame = tk.Frame(main_frame, bg=self.colors['background'])
-        button_frame.pack(fill=tk.X, pady=(5, 15))
+        button_frame.pack(fill=tk.X, pady=(5, 10))
         
         self.download_btn = tk.Button(
             button_frame,
@@ -187,9 +285,9 @@ class PatentDownloaderGUI:
             command=self.start_download,
             bg=self.colors['success'],
             fg="white",
-            font=("Segoe UI", 14, "bold"),
-            padx=50,
-            pady=15,
+            font=("Segoe UI", 12, "bold"),
+            padx=40,
+            pady=10,
             cursor="hand2",
             relief=tk.FLAT,
             bd=0,
@@ -204,21 +302,21 @@ class PatentDownloaderGUI:
             bg=self.colors['surface'],
             highlightbackground=self.colors['border'],
             highlightthickness=1,
-            padx=20,
-            pady=15
+            padx=15,
+            pady=12
         )
-        progress_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        progress_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         
         # Section header
         progress_label = tk.Label(
             progress_frame,
             text="📊 Download Progress",
-            font=("Segoe UI", 13, "bold"),
+            font=("Segoe UI", 12, "bold"),
             bg=self.colors['surface'],
             fg=self.colors['text'],
             anchor=tk.W
         )
-        progress_label.pack(fill=tk.X, pady=(0, 15))
+        progress_label.pack(fill=tk.X, pady=(0, 10))
         
         # Progress bar with style
         style = ttk.Style()
@@ -246,27 +344,27 @@ class PatentDownloaderGUI:
         self.status_label = tk.Label(
             progress_frame,
             text="⏳ Ready to download",
-            font=("Segoe UI", 11),
+            font=("Segoe UI", 10),
             fg=self.colors['text'],
             bg=self.colors['surface']
         )
-        self.status_label.pack(anchor=tk.W, pady=(0, 15))
+        self.status_label.pack(anchor=tk.W, pady=(0, 10))
         
         # Log area with modern styling
         log_label = tk.Label(
             progress_frame,
             text="📋 Activity Log",
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", 10, "bold"),
             anchor=tk.W,
             bg=self.colors['surface'],
             fg=self.colors['text']
         )
-        log_label.pack(anchor=tk.W, pady=(0, 8))
+        log_label.pack(anchor=tk.W, pady=(0, 6))
         
         self.log_text = scrolledtext.ScrolledText(
             progress_frame,
-            height=7,
-            font=("Consolas", 10),
+            height=8,
+            font=("Consolas", 9),
             bg="#fafafa",
             fg=self.colors['text'],
             relief=tk.FLAT,
@@ -280,46 +378,7 @@ class PatentDownloaderGUI:
         )
         self.log_text.pack(fill=tk.BOTH, expand=True)
         
-        # Bottom Frame with modern buttons - FIXED POSITION
-        bottom_frame = tk.Frame(main_frame, bg=self.colors['background'], pady=5)
-        bottom_frame.pack(fill=tk.X, side=tk.BOTTOM, expand=False)
-        
-        self.stop_btn = tk.Button(
-            bottom_frame,
-            text="⏹️ Stop Download",
-            command=self.stop_download,
-            bg=self.colors['danger'],
-            fg="white",
-            font=("Segoe UI", 10, "bold"),
-            padx=25,
-            pady=10,
-            state=tk.DISABLED,
-            cursor="hand2",
-            relief=tk.FLAT,
-            bd=0,
-            activebackground="#c5221f",
-            activeforeground="white",
-            disabledforeground="white"
-        )
-        self.stop_btn.pack(side=tk.LEFT, padx=(0, 10))
-        
-        open_folder_btn = tk.Button(
-            bottom_frame,
-            text="📂 Open Downloads Folder",
-            command=self.open_output_folder,
-            bg="#5f6368",
-            fg="white",
-            font=("Segoe UI", 10, "bold"),
-            padx=25,
-            pady=10,
-            cursor="hand2",
-            relief=tk.FLAT,
-            bd=0,
-            activebackground="#4a4d50",
-            activeforeground="white",
-            disabledforeground="white"
-        )
-        open_folder_btn.pack(side=tk.LEFT)
+        # Bottom buttons already packed at the beginning of create_widgets()
         
     def browse_file(self):
         """Open file dialog to select Excel file"""
@@ -366,6 +425,28 @@ class PatentDownloaderGUI:
         else:
             messagebox.showinfo("Info", "No downloads folder yet. Start downloading to create it!")
             
+    def open_main_log(self):
+        """Open the main log file"""
+        log_file = "patent_download_gui.log"
+        if os.path.exists(log_file):
+            try:
+                os.startfile(os.path.abspath(log_file))
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not open log file:\n{e}")
+        else:
+            messagebox.showinfo("Info", "Main log file doesn't exist yet.\nIt will be created when you start downloading.")
+            
+    def open_failed_log(self):
+        """Open the failed patents log file"""
+        log_file = "failed_patents.log"
+        if os.path.exists(log_file):
+            try:
+                os.startfile(os.path.abspath(log_file))
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not open log file:\n{e}")
+        else:
+            messagebox.showinfo("Info", "No failed patents log yet.\nThis file is created when a patent fails to download.")
+            
     def start_download(self):
         """Start the download process in a separate thread"""
         if not self.excel_file.get():
@@ -382,6 +463,7 @@ class PatentDownloaderGUI:
             
         # Start download in separate thread
         self.is_downloading = True
+        self.failed_patents = []  # Clear failed patents list
         self.download_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         self.log_text.delete(1.0, tk.END)
@@ -460,47 +542,99 @@ class PatentDownloaderGUI:
         cleaned = cleaned.replace(' ', '').replace('-', '').replace(',', '').replace('/', '')
         return cleaned
         
-    def download_patent(self, patent_number):
-        """Download a single patent"""
+    def construct_pdf_url(self, patent_number):
+        """Construct direct PDF URL from patent number (works for many patents)"""
+        clean_number = self.clean_patent_number(patent_number)
+        
+        # Google Patents PDF URL pattern
+        # Example: US1234567A -> https://patentimages.storage.googleapis.com/.../US1234567.pdf
+        # This is a common pattern but may not work for all patents
+        
+        # Try to construct the patent page URL first
+        patent_url = f"https://patents.google.com/patent/{clean_number}"
+        
+        # For direct PDF, we'll try common patterns
+        # Pattern 1: Standard format
+        base_url = "https://patentimages.storage.googleapis.com"
+        
+        # Extract country code and number
+        import re
+        match = re.match(r'([A-Z]{2})(\d+)([A-Z]\d*)?', clean_number)
+        if match:
+            country = match.group(1)
+            number = match.group(2)
+            kind = match.group(3) if match.group(3) else ''
+            
+            # Try common PDF URL pattern
+            # Note: The actual hash in the URL is unpredictable, so this is a fallback
+            # We'll need to fetch the page to get the real PDF URL
+            return None  # Return None to indicate we need to fetch the page
+        
+        return None
+        
+    def try_direct_download(self, patent_number):
+        """Try to download patent directly without Chrome"""
+        clean_number = self.clean_patent_number(patent_number)
+        
+        # Method 1: Try to fetch the patent page and extract PDF link using requests
         try:
-            clean_number = self.clean_patent_number(patent_number)
-            url = f"https://patents.google.com/patent/{clean_number}"
+            patent_url = f"https://patents.google.com/patent/{clean_number}"
+            self.log(f"  Trying direct download (no browser)...")
             
-            self.driver.get(url)
-            time.sleep(3)
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
             
-            # Check if patent exists
-            try:
-                WebDriverWait(self.driver, 10).until(
-                    EC.presence_of_element_located((By.TAG_NAME, "h1"))
-                )
-            except:
-                self.log(f"  ERROR: Patent {clean_number} not found")
-                return False
+            response = requests.get(patent_url, headers=headers, timeout=10)
+            response.raise_for_status()
             
-            # Try to find and download PDF
-            try:
-                # Method 1: Direct PDF link
-                pdf_link = self.driver.find_element(By.XPATH, "//a[contains(@href, '.pdf')]")
-                pdf_url = pdf_link.get_attribute('href')
-                self.download_pdf_direct(pdf_url, clean_number)
-                return True
-            except:
-                try:
-                    # Method 2: Download button
-                    download_button = WebDriverWait(self.driver, 5).until(
-                        EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Download PDF')]"))
-                    )
-                    download_button.click()
-                    time.sleep(2)
+            # Try to find PDF link in the HTML
+            import re
+            pdf_pattern = r'https://patentimages\.storage\.googleapis\.com/[^"\']+\.pdf'
+            pdf_matches = re.findall(pdf_pattern, response.text)
+            
+            if pdf_matches:
+                pdf_url = pdf_matches[0]
+                self.log(f"  Found PDF URL: {pdf_url}")
+                if self.download_pdf_direct(pdf_url, clean_number):
+                    self.log(f"  Direct download successful!")
                     return True
-                except:
-                    # Method 3: Print to PDF
-                    self.print_to_pdf(clean_number)
-                    return True
-                    
+            
+            return False
+            
         except Exception as e:
-            self.log(f"  ERROR: {e}")
+            self.log(f"  Direct download failed: {e}")
+            return False
+        
+    def log_failed_patent(self, original_number, clean_number, reason, url):
+        """Log failed patent to separate log file"""
+        failed_info = {
+            'original': original_number,
+            'cleaned': clean_number,
+            'reason': reason,
+            'url': url
+        }
+        self.failed_patents.append(failed_info)
+        
+        # Log to separate failed patents file
+        failed_logger.info(
+            f"FAILED | Original: {original_number} | Cleaned: {clean_number} | "
+            f"Reason: {reason} | URL: {url}"
+        )
+        
+    def download_patent(self, patent_number):
+        """Download a single patent - Direct download only, no browser fallback"""
+        clean_number = self.clean_patent_number(patent_number)
+        url = f"https://patents.google.com/patent/{clean_number}"
+        
+        # Try direct download (no Chrome needed)
+        if self.try_direct_download(patent_number):
+            return True
+        else:
+            # Direct download failed - just log it, don't use browser
+            error_msg = "PDF URL not found or download failed"
+            self.log(f"  FAILED: {error_msg}")
+            self.log_failed_patent(patent_number, clean_number, error_msg, url)
             return False
             
     def download_pdf_direct(self, pdf_url, patent_number):
@@ -513,9 +647,11 @@ class PatentDownloaderGUI:
             with open(filename, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
+            return True
                     
         except Exception as e:
             self.log(f"  ERROR downloading PDF: {e}")
+            raise  # Re-raise the exception so the caller knows it failed
             
     def print_to_pdf(self, patent_number):
         """Print page to PDF"""
@@ -535,13 +671,20 @@ class PatentDownloaderGUI:
             filename = os.path.join(self.output_dir, f"{patent_number}.pdf")
             with open(filename, 'wb') as f:
                 f.write(base64.b64decode(pdf_data['data']))
+            return True
                 
         except Exception as e:
             self.log(f"  ERROR printing to PDF: {e}")
+            raise  # Re-raise the exception so the caller knows it failed
             
     def download_patents(self):
         """Main download process"""
         try:
+            # Log session start to failed patents log
+            failed_logger.info("="*80)
+            failed_logger.info(f"NEW DOWNLOAD SESSION STARTED")
+            failed_logger.info("="*80)
+            
             # Read patent numbers
             patent_numbers = self.read_patent_numbers()
             
@@ -553,12 +696,9 @@ class PatentDownloaderGUI:
                 self.stop_btn.config(state=tk.DISABLED)
                 return
                 
-            # Setup browser
-            if not self.setup_driver():
-                self.is_downloading = False
-                self.download_btn.config(state=tk.NORMAL)
-                self.stop_btn.config(state=tk.DISABLED)
-                return
+            # Direct download mode - no browser needed
+            self.log("Direct download mode - downloading PDFs without browser")
+            self.log("Failed downloads will be logged to failed_patents.log")
                 
             # Download each patent
             successful = 0
@@ -589,15 +729,19 @@ class PatentDownloaderGUI:
             self.log(f"Total patents:  {len(patent_numbers)}")
             self.log(f"Successful:     {successful}")
             self.log(f"Failed:         {failed}")
+            if failed > 0:
+                self.log(f"Failed patents logged to: failed_patents.log")
             self.log("="*50)
             
             self.update_status(f"Complete! {successful}/{len(patent_numbers)} successful", 'complete')
             
-            messagebox.showinfo(
-                "Download Complete",
-                f"Downloaded {successful} out of {len(patent_numbers)} patents!\n\n"
-                f"Files saved in: {os.path.abspath(self.output_dir)}"
-            )
+            # Create message with failed patents info
+            message = f"Downloaded {successful} out of {len(patent_numbers)} patents!\n\n"
+            message += f"Files saved in: {os.path.abspath(self.output_dir)}"
+            if failed > 0:
+                message += f"\n\n{failed} patent(s) failed to download.\nCheck 'failed_patents.log' for details."
+            
+            messagebox.showinfo("Download Complete", message)
             
         except Exception as e:
             self.log(f"ERROR: {e}")

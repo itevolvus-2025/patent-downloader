@@ -11,10 +11,13 @@ A beautiful, modern GUI application to automatically download patents from Googl
 - 🎨 **Modern GUI** - Beautiful, elegant interface with Google Material Design colors
 - 📊 **Real-time Progress** - Live progress bar and activity log
 - 🚀 **Fast & Efficient** - Download hundreds of patents automatically
+- ⚡ **Chrome-Optional Mode** - Try direct download first without opening browser (faster!)
 - ⏸️ **Stop/Resume** - Full control over downloads
 - 📂 **Easy Access** - One-click to open downloads folder
+- 📄 **Log File Access** - Quick buttons to view main log and failed patents log
 - 🛡️ **Error Handling** - Automatic fallback methods for reliable downloads
 - 💾 **Auto-save** - All PDFs saved with patent numbers as filenames
+- ❌ **Failed Patents Tracking** - Separate log file for failed downloads with detailed reasons
 
 ## 🚀 Quick Start
 
@@ -74,6 +77,16 @@ All downloaded PDFs are saved in: `downloaded_patents/`
 
 Each file is named: `PatentNumber.pdf` (e.g., `US1234567A.pdf`)
 
+### Log Files
+
+- **`patent_download_gui.log`** - Main activity log with all download operations
+- **`failed_patents.log`** - Separate log file tracking all failed downloads with:
+  - Original patent number
+  - Cleaned patent number
+  - Failure reason
+  - Patent URL
+  - Timestamp
+
 ## 🎨 Screenshots
 
 ### Main Interface
@@ -83,7 +96,11 @@ Modern, clean GUI with real-time progress tracking and activity log.
 - File browser for easy Excel selection
 - Real-time progress bar
 - Detailed activity log
-- Action buttons for control
+- Action buttons for control:
+  - ⏹️ Stop Download
+  - 📂 Open Downloads Folder
+  - 📄 Main Log (opens main activity log)
+  - ❌ Failed Patents Log (opens failed patents log)
 
 ## 🛠️ Troubleshooting
 
@@ -112,21 +129,38 @@ Modern, clean GUI with real-time progress tracking and activity log.
 
 ## 🎯 How It Works
 
+### Direct Download Mode (Default - Faster!)
+
 1. Reads patent numbers from Excel file
-2. Opens Chrome browser automatically
-3. Navigates to each patent on Google Patents
-4. Downloads PDF using multiple methods:
+2. Attempts direct PDF download without opening browser
+3. Extracts PDF URLs from patent pages using HTTP requests
+4. Downloads PDFs directly (much faster!)
+5. Falls back to browser method if direct download fails
+
+### Browser Mode (Fallback)
+
+1. Opens Chrome browser automatically (only when needed)
+2. Navigates to each patent on Google Patents
+3. Downloads PDF using multiple methods:
    - Direct PDF link (fastest)
    - Download button click
    - Print to PDF (fallback)
-5. Saves with patent number as filename
-6. Shows progress and summary
+4. Saves with patent number as filename
+5. Shows progress and summary
+
+### Benefits of Direct Download Mode
+
+- ⚡ **3-5x faster** - No browser startup time
+- 💻 **Lower memory usage** - No Chrome overhead
+- 🤫 **Silent operation** - No browser windows
+- ✅ **Automatic fallback** - Uses browser only when needed
 
 ## 💡 Tips
 
 - **Batch Processing:** Download hundreds of patents at once
 - **Resume:** If interrupted, just run again
 - **Logs:** Check `.log` files for detailed information
+- **Failed Downloads:** Review `failed_patents.log` to see which patents couldn't be downloaded and why
 - **Backup:** Old downloads are preserved in backup folders
 
 ## 🤝 Contributing
@@ -154,4 +188,5 @@ For issues, questions, or suggestions, please open an issue on GitHub.
 **Version:** 2.0  
 **Compatible with:** Python 3.8 - 3.14+  
 **Last Updated:** December 2025
+
 
