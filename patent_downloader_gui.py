@@ -19,6 +19,8 @@ import os
 from pathlib import Path
 import threading
 import logging
+from datetime import datetime
+from bs4 import BeautifulSoup
 
 # Set console encoding for Windows
 if sys.platform == 'win32':
@@ -82,6 +84,7 @@ class PatentDownloaderGUI:
         self.driver = None
         self.failed_patents = []  # Track failed patents
         self.direct_download_first = tk.BooleanVar(value=True)  # Try direct download without Chrome first
+        self.patent_info_list = []  # Store patent information for Excel export
         
         # Create GUI
         self.create_widgets()
@@ -464,6 +467,7 @@ class PatentDownloaderGUI:
         # Start download in separate thread
         self.is_downloading = True
         self.failed_patents = []  # Clear failed patents list
+        self.patent_info_list = []  # Clear patent info list
         self.download_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         self.log_text.delete(1.0, tk.END)
@@ -572,6 +576,106 @@ class PatentDownloaderGUI:
         
         return None
         
+    def extract_patent_info(self, patent_number, html_content):
+        """Extract patent information from HTML"""
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Extract title
+            title = "N/A"
+            title_tag = soup.find('meta', {'name': 'DC.title'})
+            if title_tag and title_tag.get('content'):
+                title = title_tag.get('content')
+            else:
+                # Try alternative method
+                h1_tag = soup.find('h1')
+                if h1_tag:
+                    title = h1_tag.get_text(strip=True)
+            
+            # Extract publication date (not filing date)
+            publication_date = "N/A"
+            
+            # Google Patents has TWO DC.date tags:
+            # 1st = Filing/Priority date
+            # 2nd = Publication date (THIS IS WHAT WE WANT!)
+            date_tags = soup.find_all('meta', {'name': 'DC.date'})
+            if len(date_tags) >= 2:
+                # Get the SECOND DC.date tag (publication date)
+                publication_date = date_tags[1].get('content', 'N/A')
+            elif len(date_tags) == 1:
+                # If only one date, use it
+                publication_date = date_tags[0].get('content', 'N/A')
+            else:
+                # Fallback: Try to find date in <time> tag
+                time_tag = soup.find('time', {'itemprop': 'publicationDate'})
+                if not time_tag:
+                    time_tag = soup.find('time')
+                if time_tag:
+                    publication_date = time_tag.get('datetime', time_tag.get_text(strip=True))
+            
+            return {
+                'Patent Number': patent_number,
+                'Title': title,
+                'Publication Date': publication_date,
+                'Download Status': 'Success',
+                'Download Date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+        except Exception as e:
+            self.log(f"  Warning: Could not extract patent info: {e}")
+            return {
+                'Patent Number': patent_number,
+                'Title': 'N/A',
+                'Publication Date': 'N/A',
+                'Download Status': 'Success',
+                'Download Date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+    
+    def try_freepatentsonline(self, patent_number):
+        """Try to download from FreePatentsOnline as fallback"""
+        try:
+            clean_number = self.clean_patent_number(patent_number)
+            self.log(f"  Trying FreePatentsOnline...")
+            
+            # FreePatentsOnline URL format
+            # Example: https://www.freepatentsonline.com/US20160122713.pdf
+            fpo_url = f"https://www.freepatentsonline.com/{clean_number}.pdf"
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            # Try direct PDF download
+            response = requests.get(fpo_url, headers=headers, timeout=15, stream=True)
+            response.raise_for_status()
+            
+            # Check if it's actually a PDF
+            content_type = response.headers.get('content-type', '')
+            if 'pdf' in content_type.lower():
+                filename = os.path.join(self.output_dir, f"{clean_number}.pdf")
+                with open(filename, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                
+                self.log(f"  Downloaded from FreePatentsOnline!")
+                
+                # Add basic patent info (simplified)
+                patent_info = {
+                    'Patent Number': patent_number,
+                    'Title': 'Downloaded from FreePatentsOnline',
+                    'Publication Date': 'N/A',
+                    'Download Status': 'Success (FreePatentsOnline)',
+                    'Download Date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                self.patent_info_list.append(patent_info)
+                return True
+            
+            return False
+            
+        except Exception as e:
+            self.log(f"  FreePatentsOnline failed: {e}")
+            return False
+    
     def try_direct_download(self, patent_number):
         """Try to download patent directly without Chrome"""
         clean_number = self.clean_patent_number(patent_number)
@@ -579,7 +683,7 @@ class PatentDownloaderGUI:
         # Method 1: Try to fetch the patent page and extract PDF link using requests
         try:
             patent_url = f"https://patents.google.com/patent/{clean_number}"
-            self.log(f"  Trying direct download (no browser)...")
+            self.log(f"  Trying Google Patents direct download...")
             
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -588,6 +692,9 @@ class PatentDownloaderGUI:
             response = requests.get(patent_url, headers=headers, timeout=10)
             response.raise_for_status()
             
+            # Extract patent information for Excel
+            patent_info = self.extract_patent_info(patent_number, response.text)
+            
             # Try to find PDF link in the HTML
             import re
             pdf_pattern = r'https://patentimages\.storage\.googleapis\.com/[^"\']+\.pdf'
@@ -595,15 +702,17 @@ class PatentDownloaderGUI:
             
             if pdf_matches:
                 pdf_url = pdf_matches[0]
-                self.log(f"  Found PDF URL: {pdf_url}")
+                self.log(f"  Found PDF URL on Google Patents: {pdf_url}")
                 if self.download_pdf_direct(pdf_url, clean_number):
-                    self.log(f"  Direct download successful!")
+                    self.log(f"  Google Patents download successful!")
+                    # Add to patent info list
+                    self.patent_info_list.append(patent_info)
                     return True
             
             return False
             
         except Exception as e:
-            self.log(f"  Direct download failed: {e}")
+            self.log(f"  Google Patents failed: {e}")
             return False
         
     def log_failed_patent(self, original_number, clean_number, reason, url):
@@ -623,20 +732,68 @@ class PatentDownloaderGUI:
         )
         
     def download_patent(self, patent_number):
-        """Download a single patent - Direct download only, no browser fallback"""
+        """Download a single patent - Try Google Patents, then FreePatentsOnline"""
         clean_number = self.clean_patent_number(patent_number)
         url = f"https://patents.google.com/patent/{clean_number}"
         
-        # Try direct download (no Chrome needed)
+        # Try Google Patents first
         if self.try_direct_download(patent_number):
             return True
-        else:
-            # Direct download failed - just log it, don't use browser
-            error_msg = "PDF URL not found or download failed"
-            self.log(f"  FAILED: {error_msg}")
-            self.log_failed_patent(patent_number, clean_number, error_msg, url)
-            return False
+        
+        # If Google Patents failed, try FreePatentsOnline
+        self.log(f"  Google Patents failed, trying FreePatentsOnline...")
+        if self.try_freepatentsonline(patent_number):
+            return True
+        
+        # Both sources failed - log it
+        error_msg = "PDF not found on Google Patents or FreePatentsOnline"
+        self.log(f"  FAILED: {error_msg}")
+        self.log_failed_patent(patent_number, clean_number, error_msg, url)
+        return False
             
+    def create_excel_report(self):
+        """Create initial Excel file with headers"""
+        try:
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            excel_filename = f"patent_download_report_{timestamp}.xlsx"
+            excel_path = os.path.join(self.output_dir, excel_filename)
+            
+            # Create empty DataFrame with simplified headers
+            df = pd.DataFrame(columns=[
+                'Patent Number', 'Title', 'Publication Date', 'Download Status', 'Download Date'
+            ])
+            
+            # Save initial Excel file
+            df.to_excel(excel_path, index=False, engine='openpyxl')
+            
+            self.log(f"✅ Excel file created: {excel_filename}")
+            self.log(f"   Will update as patents are downloaded...")
+            return excel_path
+            
+        except Exception as e:
+            self.log(f"❌ ERROR creating Excel file: {e}")
+            return None
+    
+    def update_excel_report(self, excel_path):
+        """Update Excel file with current patent information"""
+        try:
+            if not excel_path or not os.path.exists(excel_path):
+                self.log("Excel file not found, skipping update")
+                return False
+            
+            # Create DataFrame from current patent info list
+            df = pd.DataFrame(self.patent_info_list)
+            
+            # Save to Excel (overwrite)
+            df.to_excel(excel_path, index=False, engine='openpyxl')
+            
+            return True
+            
+        except Exception as e:
+            self.log(f"Warning: Could not update Excel: {e}")
+            return False
+    
     def download_pdf_direct(self, pdf_url, patent_number):
         """Download PDF directly"""
         try:
@@ -696,9 +853,15 @@ class PatentDownloaderGUI:
                 self.stop_btn.config(state=tk.DISABLED)
                 return
                 
+            # Create Excel file first (will be updated as we go)
+            self.log("\nCreating Excel report file...")
+            excel_path = self.create_excel_report()
+            
             # Direct download mode - no browser needed
             self.log("Direct download mode - downloading PDFs without browser")
             self.log("Failed downloads will be logged to failed_patents.log")
+            if excel_path:
+                self.log(f"Excel report will be updated in real-time: {os.path.basename(excel_path)}\n")
                 
             # Download each patent
             successful = 0
@@ -715,13 +878,16 @@ class PatentDownloaderGUI:
                 if self.download_patent(patent_number):
                     successful += 1
                     self.log(f"  SUCCESS")
+                    # Update Excel immediately after successful download
+                    if excel_path:
+                        self.update_excel_report(excel_path)
                 else:
                     failed += 1
                     self.log(f"  FAILED")
                     
                 self.update_progress(i, len(patent_numbers))
                 time.sleep(2)
-                
+            
             # Summary
             self.log("\n" + "="*50)
             self.log("DOWNLOAD COMPLETE!")
@@ -731,6 +897,8 @@ class PatentDownloaderGUI:
             self.log(f"Failed:         {failed}")
             if failed > 0:
                 self.log(f"Failed patents logged to: failed_patents.log")
+            if excel_path:
+                self.log(f"Excel report saved: {os.path.basename(excel_path)}")
             self.log("="*50)
             
             self.update_status(f"Complete! {successful}/{len(patent_numbers)} successful", 'complete')
@@ -738,6 +906,8 @@ class PatentDownloaderGUI:
             # Create message with failed patents info
             message = f"Downloaded {successful} out of {len(patent_numbers)} patents!\n\n"
             message += f"Files saved in: {os.path.abspath(self.output_dir)}"
+            if excel_path:
+                message += f"\n\n📊 Excel report generated:\n{os.path.basename(excel_path)}"
             if failed > 0:
                 message += f"\n\n{failed} patent(s) failed to download.\nCheck 'failed_patents.log' for details."
             
