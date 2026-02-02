@@ -85,6 +85,7 @@ class PatentDownloaderGUI:
         self.failed_patents = []  # Track failed patents
         self.direct_download_first = tk.BooleanVar(value=True)  # Try direct download without Chrome first
         self.patent_info_list = []  # Store patent information for Excel export
+        self.download_mode = tk.StringVar(value="download")  # Default to download mode
         
         # Create GUI
         self.create_widgets()
@@ -278,13 +279,49 @@ class PatentDownloaderGUI:
         )
         info_label.pack(anchor=tk.W, pady=(6, 0))
         
+        # Download Mode Selection
+        mode_frame = tk.Frame(main_frame, bg=self.colors['background'])
+        mode_frame.pack(fill=tk.X, pady=(5, 10))
+        
+        mode_label = tk.Label(
+            mode_frame,
+            text="⚙️ Mode:",
+            font=("Segoe UI", 10, "bold"),
+            bg=self.colors['background'],
+            fg=self.colors['text']
+        )
+        mode_label.pack(side=tk.LEFT, padx=(0, 10))
+        
+        radio_style = {
+            'bg': self.colors['background'],
+            'activebackground': self.colors['background'],
+            'font': ("Segoe UI", 10),
+            'cursor': "hand2"
+        }
+        
+        tk.Radiobutton(
+            mode_frame,
+            text="Download Patent + Details",
+            variable=self.download_mode,
+            value="download",
+            **radio_style
+        ).pack(side=tk.LEFT, padx=(0, 15))
+        
+        tk.Radiobutton(
+            mode_frame,
+            text="Fetch Details Only",
+            variable=self.download_mode,
+            value="fetch",
+            **radio_style
+        ).pack(side=tk.LEFT)
+
         # Download Button Section (Direct download enabled by default)
         button_frame = tk.Frame(main_frame, bg=self.colors['background'])
         button_frame.pack(fill=tk.X, pady=(5, 10))
         
         self.download_btn = tk.Button(
             button_frame,
-            text="🚀 Start Download",
+            text="🚀 Start",
             command=self.start_download,
             bg=self.colors['success'],
             fg="white",
@@ -583,40 +620,114 @@ class PatentDownloaderGUI:
             
             # Extract title
             title = "N/A"
-            title_tag = soup.find('meta', {'name': 'DC.title'})
-            if title_tag and title_tag.get('content'):
-                title = title_tag.get('content')
-            else:
-                # Try alternative method
-                h1_tag = soup.find('h1')
-                if h1_tag:
-                    title = h1_tag.get_text(strip=True)
             
-            # Extract publication date (not filing date)
+            # Prefer H1 (visual title) as it's usually the translated English version on /en pages
+            h1_tag = soup.find('h1')
+            if h1_tag:
+                title = h1_tag.get_text(strip=True)
+            else:
+                # Fallback to metadata
+                title_tag = soup.find('meta', {'name': 'DC.title'})
+                if title_tag and title_tag.get('content'):
+                    title = title_tag.get('content')
+            
+            # Extract publication date and application date
             publication_date = "N/A"
+            application_date = "N/A"
             
             # Google Patents has TWO DC.date tags:
-            # 1st = Filing/Priority date
-            # 2nd = Publication date (THIS IS WHAT WE WANT!)
+            # 1st = Filing/Priority/Application date
+            # 2nd = Publication date
             date_tags = soup.find_all('meta', {'name': 'DC.date'})
             if len(date_tags) >= 2:
-                # Get the SECOND DC.date tag (publication date)
+                # 1st is Application Date
+                application_date = date_tags[0].get('content', 'N/A')
+                # 2nd is Publication Date
                 publication_date = date_tags[1].get('content', 'N/A')
             elif len(date_tags) == 1:
-                # If only one date, use it
-                publication_date = date_tags[0].get('content', 'N/A')
+                # If only one date, assume it's publication or use logic to verify
+                # Usually Google Patents lists filing date first if both exist
+                # But for safety, if only one, let's check context or assume publication if it's the only one shown prominently
+                # However, consistent with comment above: 1st is filing. 
+                # Let's try to be smarter or just take it as application date if older?
+                # For simplicity, if only 1 tag, we might miss one. Let's look for other tags.
+                
+                # Check if this single date matches publicationDate in time tag
+                date_val = date_tags[0].get('content', 'N/A')
+                time_pub = soup.find('time', {'itemprop': 'publicationDate'})
+                if time_pub and date_val in str(time_pub):
+                    publication_date = date_val
+                else:
+                    # Fallback to assigning it to application date if we are unsure, or leave as is.
+                    # Let's assign to publication date to be safe as that's the primary need usually
+                    publication_date = date_val
+                    
+                # Try to find filing date from other meta tags if possible
+                meta_filing = soup.find('meta', {'name': 'DC.date.created'})
+                if meta_filing:
+                    application_date = meta_filing.get('content')
             else:
-                # Fallback: Try to find date in <time> tag
-                time_tag = soup.find('time', {'itemprop': 'publicationDate'})
-                if not time_tag:
-                    time_tag = soup.find('time')
-                if time_tag:
-                    publication_date = time_tag.get('datetime', time_tag.get_text(strip=True))
+                # Fallback: Try to find date in <time> tags
+                time_pub = soup.find('time', {'itemprop': 'publicationDate'})
+                if time_pub:
+                    publication_date = time_pub.get('datetime', time_pub.get_text(strip=True))
+                
+                time_filing = soup.find('time', {'itemprop': 'filingDate'})
+                if time_filing:
+                    application_date = time_filing.get('datetime', time_filing.get_text(strip=True))
+
+            # Clean the title
+            # Remove " - Google Patents" suffix
+            if " - Google Patents" in title:
+                title = title.replace(" - Google Patents", "")
+            
+            # Remove patent number prefix (e.g., "WO2024169908A1 - ")
+            # Use regex to replace "PatentNumber - " with empty string at the start
+            import re
+            clean_num = self.clean_patent_number(patent_number)
+            # Try to match patent number (with or without dashes/spaces) followed by " - "
+            # We use a somewhat broad pattern to catch variations
+            title = re.sub(r'^' + re.escape(clean_num) + r'\s*-\s*', '', title, flags=re.IGNORECASE)
+            # Also catch if the original patent number string was used
+            title = re.sub(r'^' + re.escape(patent_number) + r'\s*-\s*', '', title, flags=re.IGNORECASE)
+            
+            # Additional cleanup for the format "ID - Title" if ID wasn't exactly caught above
+            # Check if title starts with something that looks like a patent ID
+            match = re.match(r'^([A-Z]{2}\d+[A-Z\d]*)\s*-\s*(.+)', title)
+            if match:
+                possible_id = match.group(1)
+                # If the start looks like our patent number (ignoring non-alphanumeric), strip it
+                if self.clean_patent_number(possible_id) == clean_num:
+                    title = match.group(2)
+
+            # Extract Applicant/Assignee
+            applicant = "N/A"
+            
+            # Try to find assignee (most common for granted patents)
+            assignee_elem = soup.find(attrs={"itemprop": "assignee"})
+            if assignee_elem:
+                applicant = assignee_elem.get_text(strip=True)
+            else:
+                # Try applicant (often for applications)
+                applicant_elem = soup.find(attrs={"itemprop": "applicant"})
+                if applicant_elem:
+                    applicant = applicant_elem.get_text(strip=True)
+                else:
+                    # Fallback: Look for "Current Assignee" or "Applicant" in dt tags
+                    for dt in soup.find_all('dt'):
+                        text = dt.get_text(strip=True).lower()
+                        if 'assignee' in text or 'applicant' in text:
+                            dd = dt.find_next_sibling('dd')
+                            if dd:
+                                applicant = dd.get_text(strip=True)
+                                break
             
             return {
                 'Patent Number': patent_number,
                 'Title': title,
+                'Application Date': application_date,
                 'Publication Date': publication_date,
+                'Applicant/Assignee': applicant,
                 'Download Status': 'Success',
                 'Download Date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
@@ -626,7 +737,9 @@ class PatentDownloaderGUI:
             return {
                 'Patent Number': patent_number,
                 'Title': 'N/A',
+                'Application Date': 'N/A',
                 'Publication Date': 'N/A',
+                'Applicant/Assignee': 'N/A',
                 'Download Status': 'Success',
                 'Download Date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
@@ -663,7 +776,9 @@ class PatentDownloaderGUI:
                 patent_info = {
                     'Patent Number': patent_number,
                     'Title': 'Downloaded from FreePatentsOnline',
+                    'Application Date': 'N/A',
                     'Publication Date': 'N/A',
+                    'Applicant/Assignee': 'N/A',
                     'Download Status': 'Success (FreePatentsOnline)',
                     'Download Date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
@@ -676,14 +791,15 @@ class PatentDownloaderGUI:
             self.log(f"  FreePatentsOnline failed: {e}")
             return False
     
-    def try_direct_download(self, patent_number):
+    def try_direct_download(self, patent_number, fetch_only=False):
         """Try to download patent directly without Chrome"""
         clean_number = self.clean_patent_number(patent_number)
         
         # Method 1: Try to fetch the patent page and extract PDF link using requests
         try:
-            patent_url = f"https://patents.google.com/patent/{clean_number}"
-            self.log(f"  Trying Google Patents direct download...")
+            patent_url = f"https://patents.google.com/patent/{clean_number}/en"
+            action_text = "Fetching details" if fetch_only else "Download"
+            self.log(f"  Trying Google Patents ({action_text})...")
             
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -694,6 +810,13 @@ class PatentDownloaderGUI:
             
             # Extract patent information for Excel
             patent_info = self.extract_patent_info(patent_number, response.text)
+            
+            # If fetch only, we are done
+            if fetch_only:
+                patent_info['Download Status'] = 'Details Fetched'
+                self.patent_info_list.append(patent_info)
+                self.log(f"  Details fetched successfully!")
+                return True
             
             # Try to find PDF link in the HTML
             import re
@@ -734,12 +857,20 @@ class PatentDownloaderGUI:
     def download_patent(self, patent_number):
         """Download a single patent - Try Google Patents, then FreePatentsOnline"""
         clean_number = self.clean_patent_number(patent_number)
-        url = f"https://patents.google.com/patent/{clean_number}"
+        url = f"https://patents.google.com/patent/{clean_number}/en"
+        
+        fetch_only = (self.download_mode.get() == "fetch")
         
         # Try Google Patents first
-        if self.try_direct_download(patent_number):
+        if self.try_direct_download(patent_number, fetch_only=fetch_only):
             return True
         
+        # If fetch only mode, we don't try FPO or other incomplete sources as they don't provide rich metadata
+        if fetch_only:
+             self.log(f"  Could not fetch details from Google Patents")
+             # We could add an entry for failed fetch if desired, but user flow usually implies just logging failure
+             return False
+
         # If Google Patents failed, try FreePatentsOnline
         self.log(f"  Google Patents failed, trying FreePatentsOnline...")
         if self.try_freepatentsonline(patent_number):
@@ -761,7 +892,7 @@ class PatentDownloaderGUI:
             
             # Create empty DataFrame with simplified headers
             df = pd.DataFrame(columns=[
-                'Patent Number', 'Title', 'Publication Date', 'Download Status', 'Download Date'
+                'Patent Number', 'Title', 'Application Date', 'Publication Date', 'Applicant/Assignee', 'Download Status', 'Download Date'
             ])
             
             # Save initial Excel file
@@ -858,12 +989,14 @@ class PatentDownloaderGUI:
             excel_path = self.create_excel_report()
             
             # Direct download mode - no browser needed
-            self.log("Direct download mode - downloading PDFs without browser")
-            self.log("Failed downloads will be logged to failed_patents.log")
+            mode_text = "FETCH DETAILS ONLY" if self.download_mode.get() == 'fetch' else "DOWNLOAD PDF + DETAILS"
+            self.log(f"Mode: {mode_text}")
+            self.log("Direct download/fetch mode - using requests")
+            self.log("Failed items will be logged to failed_patents.log")
             if excel_path:
                 self.log(f"Excel report will be updated in real-time: {os.path.basename(excel_path)}\n")
                 
-            # Download each patent
+            # Download/Fetch each patent
             successful = 0
             failed = 0
             
@@ -897,6 +1030,9 @@ class PatentDownloaderGUI:
             self.log(f"Failed:         {failed}")
             if failed > 0:
                 self.log(f"Failed patents logged to: failed_patents.log")
+                self.log("Failed Patent Numbers:")
+                for fail in self.failed_patents:
+                    self.log(f" - {fail['original']}")
             if excel_path:
                 self.log(f"Excel report saved: {os.path.basename(excel_path)}")
             self.log("="*50)
